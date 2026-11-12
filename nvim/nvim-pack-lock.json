@@ -1,0 +1,33 @@
+{
+  "plugins": {
+    "auto-session": {
+      "rev": "02a5588f677970a9bc784115c62bef9e5855499b",
+      "src": "https://github.com/rmagatti/auto-session"
+    },
+    "fzf-lua": {
+      "rev": "ded1c96d3d9d74634287d722431c26690968a4bf",
+      "src": "https://github.com/ibhagwan/fzf-lua"
+    },
+    "gitsigns.nvim": {
+      "rev": "ef707fb93301a9b856f36eae4c8f56f5b988a794",
+      "src": "https://github.com/lewis6991/gitsigns.nvim"
+    },
+    "gruvbox.nvim": {
+      "rev": "48262cda6a8a921b159c8ec3e21b48ccd870b7b2",
+      "src": "https://github.com/ellisonleao/gruvbox.nvim"
+    },
+    "neo-tree.nvim": {
+      "rev": "1a14083046d96e88e361d1da00761c40d45012f3",
+      "src": "https://github.com/nvim-neo-tree/neo-tree.nvim",
+      "version": "'v3.x'"
+    },
+    "nui.nvim": {
+      "rev": "10fc361835c856ba4233ef5ea135b919bf3dce97",
+      "src": "https://github.com/MunifTanjim/nui.nvim"
+    },
+    "plenary.nvim": {
+      "rev": "74b06c6c75e4eeb3108ec01852001636d85a932b",
+      "src": "https://github.com/nvim-lua/plenary.nvim"
+    }
+  }
+}

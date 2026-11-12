@@ -1,0 +1,251 @@
+#!/usr/bin/python3
+"""ws - symlink-folder workspaces for Neovim.
+
+A workspace is a real directory full of symlinks to the folders you want to see
+together (the stand-in for a VS Code multi-root workspace). The list of folders
+lives in <name>.code-workspace next to it, in VS Code's own format, and
+`ws sync` builds the symlinks from that list.
+
+  ws                          list workspaces
+  ws <name>                   sync, cd into the workspace and start nvim
+  ws new <name> <dir>...      create a workspace from folders
+  ws add <name> <dir>...      add folders to a workspace
+  ws rm <name> <root>...      drop roots (removes the link, never the folder)
+  ws sync <name>|--all        create/repair symlinks from the folder list
+       [--prune]              ...and remove links no longer in the list
+  ws path <name>              print the workspace directory
+
+Workspaces live in $WS_HOME (default: ~/src/workspaces).
+"""
+import json
+import os
+import re
+import sys
+
+WS_HOME = os.path.expanduser(os.environ.get("WS_HOME", "~/src/workspaces"))
+SUFFIX = ".code-workspace"
+RESERVED = {"ls", "list", "new", "add", "rm", "sync", "path", "open", "help"}
+
+
+def die(msg):
+    print(f"ws: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def clean(name):
+    name = name.rstrip("/")
+    return name[: -len(SUFFIX)] if name.endswith(SUFFIX) else name
+
+
+def manifest_path(name):
+    return os.path.join(WS_HOME, name + SUFFIX)
+
+
+def ws_dir(name):
+    return os.path.join(WS_HOME, name)
+
+
+def all_names():
+    names = set()
+    if os.path.isdir(WS_HOME):
+        for entry in os.listdir(WS_HOME):
+            full = os.path.join(WS_HOME, entry)
+            if entry.endswith(SUFFIX):
+                names.add(clean(entry))
+            elif os.path.isdir(full) and not entry.startswith("."):
+                names.add(entry)
+    return sorted(names)
+
+
+def read_manifest(name):
+    with open(manifest_path(name)) as fh:
+        text = fh.read()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # .code-workspace files are JSONC: allow // comments and trailing commas.
+        text = re.sub(r"^\s*//.*$", "", text, flags=re.M)
+        text = re.sub(r",(\s*[}\]])", r"\1", text)
+        return json.loads(text)
+
+
+def write_manifest(name, data):
+    os.makedirs(WS_HOME, exist_ok=True)
+    with open(manifest_path(name), "w") as fh:
+        json.dump(data, fh, indent="\t")
+        fh.write("\n")
+
+
+def target_of(folder):
+    return os.path.normpath(os.path.join(WS_HOME, os.path.expanduser(folder["path"])))
+
+
+def load_folders(name):
+    """Return [(link_name, absolute_target)] from the manifest."""
+    folders, seen = [], set()
+    for folder in read_manifest(name).get("folders", []):
+        if not folder.get("path"):  # remote/URI-only folders have no local path
+            continue
+        target = target_of(folder)
+        link = folder.get("name") or os.path.basename(target)
+        if link in seen:  # two roots with the same basename: qualify with the parent
+            link = f"{os.path.basename(os.path.dirname(target))}-{link}"
+        seen.add(link)
+        folders.append((link, target))
+    return folders
+
+
+def sync(name, prune=False, quiet=False):
+    def say(status, link, detail=""):
+        if not quiet or status != "ok":
+            print(f"  {status:<8} {link}{('  ' + detail) if detail else ''}")
+
+    if not os.path.isfile(manifest_path(name)):
+        if os.path.isdir(ws_dir(name)):
+            return True  # hand-made workspace, nothing to sync
+        die(f"no workspace '{name}' (looked for {manifest_path(name)})")
+
+    wsdir = ws_dir(name)
+    os.makedirs(wsdir, exist_ok=True)
+    if not quiet:
+        print(f"{name}  ({wsdir})")
+
+    ok, expected = True, set()
+    for link, target in load_folders(name):
+        expected.add(link)
+        dest = os.path.join(wsdir, link)
+        rel = os.path.relpath(target, wsdir)
+        if not os.path.isdir(target):
+            say("MISSING", link, f"target does not exist: {target}")
+            ok = False
+        elif os.path.islink(dest):
+            if os.path.realpath(dest) == os.path.realpath(target):
+                say("ok", link)
+            else:
+                os.unlink(dest)
+                os.symlink(rel, dest)
+                say("updated", link, f"-> {rel}")
+        elif os.path.lexists(dest):
+            say("SKIPPED", link, "exists and is not a symlink; left alone")
+            ok = False
+        else:
+            os.symlink(rel, dest)
+            say("linked", link, f"-> {rel}")
+
+    for entry in sorted(os.listdir(wsdir)):
+        dest = os.path.join(wsdir, entry)
+        if os.path.islink(dest) and entry not in expected:
+            if prune:
+                os.unlink(dest)  # removes the link only, never the target
+                say("pruned", entry)
+            else:
+                say("stale", entry, "not in the folder list (ws sync --prune removes the link)")
+    return ok
+
+
+def cmd_list():
+    names = all_names()
+    if not names:
+        print(f"no workspaces in {WS_HOME}")
+        return
+    for name in names:
+        wsdir, has_manifest = ws_dir(name), os.path.isfile(manifest_path(name))
+        links = (
+            sum(1 for e in os.listdir(wsdir) if os.path.islink(os.path.join(wsdir, e)))
+            if os.path.isdir(wsdir)
+            else 0
+        )
+        if has_manifest:
+            want = len(load_folders(name))
+            state = f"{links}/{want} roots linked" if os.path.isdir(wsdir) else f"{want} roots, not synced yet"
+        else:
+            state = f"{links} roots linked (no folder list)"
+        print(f"  {name:<32} {state}")
+
+
+def cmd_add(name, dirs, create):
+    if name in RESERVED or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        die(f"'{name}' is not a usable workspace name")
+    exists = os.path.isfile(manifest_path(name))
+    if create and (exists or os.path.exists(ws_dir(name))):
+        die(f"workspace '{name}' already exists; use: ws add {name} <dir>...")
+    if not create and not exists:
+        die(f"no workspace '{name}'; use: ws new {name} <dir>...")
+    if not dirs:
+        die(f"usage: ws {'new' if create else 'add'} {name} <dir>...")
+
+    data = read_manifest(name) if exists else {"folders": [], "settings": {}}
+    folders = data.setdefault("folders", [])
+    have = {os.path.realpath(target_of(f)) for f in folders if f.get("path")}
+    for raw in dirs:
+        target = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(target):
+            die(f"not a directory: {raw}")
+        if os.path.realpath(target) in have:
+            print(f"  already in {name}: {raw}")
+            continue
+        have.add(os.path.realpath(target))
+        folders.append({"path": os.path.relpath(target, WS_HOME)})
+    write_manifest(name, data)
+    sys.exit(0 if sync(name) else 1)
+
+
+def cmd_rm(name, roots):
+    if not os.path.isfile(manifest_path(name)) or not roots:
+        die("usage: ws rm <name> <root>...  (root = the name shown inside the workspace)")
+    data = read_manifest(name)
+    by_link = dict(load_folders(name))
+    for root in roots:
+        root = root.rstrip("/")
+        if root not in by_link:
+            die(f"'{root}' is not a root of {name} (roots: {', '.join(by_link) or 'none'})")
+        target = by_link[root]
+        data["folders"] = [f for f in data["folders"] if not f.get("path") or target_of(f) != target]
+    write_manifest(name, data)
+    sys.exit(0 if sync(name, prune=True) else 1)
+
+
+def cmd_open(name):
+    sync(name, quiet=True)
+    wsdir = ws_dir(name)
+    os.chdir(wsdir)
+    os.environ["PWD"] = wsdir
+    try:
+        os.execvp("nvim", ["nvim"])
+    except FileNotFoundError:
+        die("nvim not found on PATH")
+
+
+def main(argv):
+    if not argv or argv[0] in ("ls", "list"):
+        return cmd_list()
+    if argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    if argv[0] in ("new", "add"):
+        if len(argv) < 2:
+            die(f"usage: ws {argv[0]} <name> <dir>...")
+        return cmd_add(clean(argv[1]), argv[2:], create=argv[0] == "new")
+    if argv[0] == "rm":
+        if len(argv) < 2:
+            die("usage: ws rm <name> <root>...")
+        return cmd_rm(clean(argv[1]), argv[2:])
+    if argv[0] == "sync":
+        args = [a for a in argv[1:] if not a.startswith("--")]
+        every, prune = "--all" in argv, "--prune" in argv
+        names = [n for n in all_names() if os.path.isfile(manifest_path(n))] if every else [clean(a) for a in args]
+        if not names:
+            die("usage: ws sync <name>|--all [--prune]")
+        results = [sync(n, prune=prune) for n in names]
+        sys.exit(0 if all(results) else 1)
+    if argv[0] == "path":
+        if len(argv) < 2:
+            die("usage: ws path <name>")
+        print(ws_dir(clean(argv[1])))
+        return
+    name = clean(argv[1] if argv[0] == "open" and len(argv) > 1 else argv[0])
+    cmd_open(name)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
